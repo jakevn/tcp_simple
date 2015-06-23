@@ -56,7 +56,7 @@ impl TcpSock {
     };
 
     thread::spawn(move|| {
-      TcpSock::accept_loop(conn_tx, recv_tx.clone(), &accept_listener);
+      TcpSock::accept_loop(conn_tx, recv_tx, disc_tx, &accept_listener);
     });
 
     sock
@@ -73,7 +73,7 @@ impl TcpSock {
     }
   }
 
-  fn recv_loop(recv_tx: Sender<Message>, mut conn: TcpStream) {
+  fn recv_loop(recv_tx: Sender<Message>, disc_tx: Sender<SocketAddrV4>, mut conn: TcpStream) {
     let mut buf = [0; 1400];
     loop {
       match conn.read(&mut buf) {
@@ -87,17 +87,26 @@ impl TcpSock {
       }
     }
     let _ = conn.shutdown(Shutdown::Both);
+    match conn.peer_addr().unwrap() {
+        SocketAddr::V4(s) => { let _ = disc_tx.send(s); },
+        _ => {},
+    };
   }
 
-  fn accept_loop(conn_tx: Sender<(SocketAddrV4, TcpStream)>, recv_tx: Sender<Message>, listener: &TcpListener) {
+  fn accept_loop(conn_tx: Sender<(SocketAddrV4, TcpStream)>,
+                 recv_tx: Sender<Message>,
+                 disc_tx: Sender<SocketAddrV4>,
+                 listener: &TcpListener) 
+  {
     for stream in listener.incoming() {
       match stream {
         Ok(stream) => {
           match stream.try_clone() {
             Ok(c) => {
               let rtx = recv_tx.clone();
+              let dtx = disc_tx.clone();
               thread::spawn(move|| {
-                TcpSock::recv_loop(rtx, c);
+                TcpSock::recv_loop(rtx, dtx, c);
               });
             },
             Err(_) => { continue; },
@@ -106,7 +115,7 @@ impl TcpSock {
             SocketAddr::V4(s) => {
               match conn_tx.send((s, stream)) {
                 Ok(_) => {},
-                Err(_) => {},
+                Err(_) => return,
               }
             }
             _ => {}
@@ -141,6 +150,14 @@ impl TcpSock {
       },
       Err(_) => {},
     };
+
+    match self.disc_rx.try_recv() {
+      Ok(addr) => {
+        self.conns.remove(&addr);
+        return TcpEvent::Disconn(addr);
+      }
+      Err(_) => {},
+    }
 
     match self.msg_rx.try_recv() {
       Ok(msg) => return TcpEvent::RecvMsg(msg),
