@@ -9,13 +9,13 @@ use std::sync::mpsc::{Sender, Receiver};
 use std::net::{TcpListener, TcpStream, Shutdown, SocketAddrV4, SocketAddr};
 
 pub struct Message {
-  count: usize,
-  buf: [u8; 1400],
+  pub count: usize,
+  pub buf: [u8; 1400],
 }
 
 pub struct TcpCfg {
-  address: SocketAddrV4,
-  max_conn: usize,
+  pub address: SocketAddrV4,
+  pub max_conn: usize,
 }
 
 pub struct TcpSock {
