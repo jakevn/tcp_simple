@@ -42,11 +42,11 @@ impl TcpSock {
   pub fn new_from_cfg(cfg: TcpCfg) -> TcpSock {
     let conns = HashMap::new();
     let listener = TcpListener::bind(cfg.address).unwrap();
-
     let (conn_tx, conn_rx) = channel();
     let (disc_tx, disc_rx) = channel();
     let (recv_tx, recv_rx) = channel();
     let accept_listener = listener.try_clone().unwrap();
+    
     let sock = TcpSock{
       conns: conns,
       listener: listener,
@@ -75,21 +75,15 @@ impl TcpSock {
 
   fn recv_loop(recv_tx: Sender<Message>, disc_tx: Sender<SocketAddrV4>, mut conn: TcpStream) {
     let mut buf = [0; 1400];
-    loop {
-      match conn.read(&mut buf) {
-        Ok(count) if count > 0 => {
-          match recv_tx.send(Message{count: count, buf: buf}) {
-            Ok(_) => {},
-            Err(_) => break, 
-          }
-        },
-        _ => break,
+    while let Ok(count) = conn.read(&mut buf) {
+      match recv_tx.send(Message{count: count, buf: buf}) {
+        Ok(_) => {},
+        Err(_) => break,
       }
     }
     let _ = conn.shutdown(Shutdown::Both);
-    match conn.peer_addr().unwrap() {
-        SocketAddr::V4(s) => { let _ = disc_tx.send(s); },
-        _ => {},
+    if let SocketAddr::V4(s) = conn.peer_addr().unwrap() {
+      let _ = disc_tx.send(s);
     };
   }
 
@@ -99,30 +93,21 @@ impl TcpSock {
                  listener: &TcpListener) 
   {
     for stream in listener.incoming() {
-      match stream {
-        Ok(stream) => {
-          match stream.try_clone() {
-            Ok(c) => {
-              let rtx = recv_tx.clone();
-              let dtx = disc_tx.clone();
-              thread::spawn(move|| {
-                TcpSock::recv_loop(rtx, dtx, c);
-              });
-            },
-            Err(_) => { continue; },
+      if let Ok(s) = stream {
+        let c = s.try_clone().unwrap();
+        let rtx = recv_tx.clone();
+        let dtx = disc_tx.clone();
+        thread::spawn(move|| {
+          TcpSock::recv_loop(rtx, dtx, c);
+        });
+
+        if let SocketAddr::V4(addr) = s.peer_addr().unwrap() {
+          match conn_tx.send((addr, s)) {
+            Ok(_) => {},
+            Err(_) => return,
           }
-          match stream.peer_addr().unwrap() {
-            SocketAddr::V4(s) => {
-              match conn_tx.send((s, stream)) {
-                Ok(_) => {},
-                Err(_) => return,
-              }
-            }
-            _ => {}
-          }
-        },
-        Err(_) => continue, 
-      };
+        };
+      }
     }
   }
 
@@ -137,26 +122,18 @@ impl TcpSock {
   }
 
   pub fn send_to_all(&mut self, buf: &[u8]) {
-    for (_, conn) in self.conns.iter_mut() {
-      let _ = conn.write(buf);
-    }
+    let _ = self.conns.iter_mut().map(|(_,c)| { c.write(buf) });
   }
 
   pub fn poll(&mut self) -> TcpEvent {
-    match self.conn_rx.try_recv() {
-      Ok((addr, conn)) => {
-        self.conns.insert(addr, conn);
-        return TcpEvent::NewConn(addr);
-      },
-      Err(_) => {},
-    };
+    if let Ok((addr, conn)) = self.conn_rx.try_recv() {
+      self.conns.insert(addr, conn);
+      return TcpEvent::NewConn(addr);
+    }
 
-    match self.disc_rx.try_recv() {
-      Ok(addr) => {
-        self.conns.remove(&addr);
-        return TcpEvent::Disconn(addr);
-      }
-      Err(_) => {},
+    if let Ok(addr) = self.disc_rx.try_recv() {
+      self.conns.remove(&addr);
+      return TcpEvent::Disconn(addr);
     }
 
     match self.msg_rx.try_recv() {
